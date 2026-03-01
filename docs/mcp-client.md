@@ -111,6 +111,17 @@ await this.addMcpServer("github", "https://mcp.github.com/mcp", {
 
 These options are persisted and used when reconnecting after hibernation or after OAuth completion. Default: 3 attempts, 500ms base delay, 5s max delay. See [Retries](./retries.md) for more details.
 
+### URL Security
+
+MCP server URLs are validated before connection to prevent Server-Side Request Forgery (SSRF). The following URL targets are blocked:
+
+- Private/internal IP ranges (RFC 1918: `10.x`, `172.16-31.x`, `192.168.x`)
+- Loopback addresses (`127.x`, `::1`)
+- Link-local addresses (`169.254.x`, `fe80::`)
+- Cloud metadata endpoints (`169.254.169.254`)
+
+If you need to connect to an internal MCP server, use the [RPC transport](./mcp-transports.md) with a Durable Object binding instead of HTTP.
+
 ### Return Value
 
 `addMcpServer()` returns the connection state:
@@ -429,6 +440,22 @@ const disposable = this.mcp.onServerStateChanged(() => {
 // disposable.dispose();
 ```
 
+### Waiting for Connections
+
+After hibernation or when connections are being restored in the background, MCP tools may not be immediately available. Use `waitForConnections()` to wait until all in-flight connection and discovery operations have settled:
+
+```typescript
+// Wait indefinitely for all connections to be ready
+await this.mcp.waitForConnections();
+
+// Wait with a timeout (in milliseconds)
+await this.mcp.waitForConnections({ timeout: 10_000 });
+```
+
+This is useful when you need to call `this.mcp.getAITools()` immediately after the agent wakes from hibernation. Without waiting, tools from servers that are still reconnecting will be missing.
+
+> **Note:** `AIChatAgent` handles this automatically via the `waitForMcpConnections` property (defaults to `{ timeout: 10_000 }`). You only need `waitForConnections()` directly when using `Agent` with MCP, or when you want finer control inside `onChatMessage`.
+
 ### Error Recovery
 
 ```typescript
@@ -534,7 +561,11 @@ Add and connect to an MCP server. Throws if connection or discovery fails.
 
 For non-OAuth servers, `callbackHost` is not required — you can call `addMcpServer("name", url)` with no options. For RPC transport, pass a `DurableObjectNamespace` binding instead of a URL. See [MCP Transports](./mcp-transports.md) for details.
 
-If `addMcpServer` is called with a `name` that already has an active connection, the existing connection is returned instead of creating a duplicate.
+Calling `addMcpServer` is idempotent when both the server name **and** URL match an existing active connection — the existing connection is returned without creating a duplicate. This makes it safe to call in `onStart()` without worrying about duplicate connections on restart.
+
+If you call `addMcpServer` with the same name but a **different** URL, a new connection is created. Both connections remain active and their tools are merged in `getAITools()`. To replace a server, call `removeMcpServer(oldId)` first.
+
+> **Note:** URLs are normalized before comparison (trailing slashes, default ports, and hostname case are handled), so `https://MCP.Example.com` and `https://mcp.example.com/` are treated as the same URL.
 
 ### removeMcpServer()
 
