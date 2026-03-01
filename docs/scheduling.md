@@ -225,6 +225,65 @@ async syncData() {
 - Rate-limited API polling with precise control
 - Real-time data synchronization
 
+## Keeping the Agent Alive
+
+Durable Objects are evicted after a period of inactivity (typically 70-140 seconds with no incoming requests, WebSocket messages, or alarms). During long-running operations — streaming LLM responses, waiting on external APIs, running multi-step computations — the agent can be evicted mid-flight.
+
+`keepAlive()` prevents this by creating a 30-second heartbeat schedule that keeps the agent active until you are done:
+
+```typescript
+const dispose = await this.keepAlive();
+try {
+  // Long-running work that must not be interrupted
+  const result = await longRunningComputation();
+  await sendResults(result);
+} finally {
+  dispose();
+}
+```
+
+The returned disposer function cancels the heartbeat. Always call it when the work is done — otherwise the heartbeat continues indefinitely.
+
+### How it works
+
+`keepAlive()` calls `scheduleEvery(30, "_cf_keepAliveHeartbeat")` under the hood. The internal `_cf_keepAliveHeartbeat` callback is a no-op — the alarm firing itself is what resets the inactivity timer. Because it uses the scheduling system:
+
+- The heartbeat does not conflict with your own schedules (the scheduling system multiplexes through a single alarm slot)
+- The heartbeat shows up in `getSchedules()` if you need to inspect it
+- Multiple concurrent `keepAlive()` calls each get their own schedule, so they do not interfere with each other
+
+### Multiple concurrent callers
+
+Each `keepAlive()` call returns an independent disposer:
+
+```typescript
+const dispose1 = await this.keepAlive();
+const dispose2 = await this.keepAlive();
+
+// Both heartbeats are active
+dispose1(); // Only cancels the first heartbeat
+// Agent is still alive via dispose2's heartbeat
+
+dispose2(); // Now the agent can go idle
+```
+
+### AIChatAgent
+
+`AIChatAgent` automatically calls `keepAlive()` during streaming responses. You do not need to add it yourself when using `AIChatAgent` — every LLM stream is protected from idle eviction by default.
+
+### When to use keepAlive()
+
+| Scenario                                    | Use keepAlive()?                       |
+| ------------------------------------------- | -------------------------------------- |
+| Streaming LLM responses via `AIChatAgent`   | No — already built in                  |
+| Long-running computation in a custom Agent  | Yes                                    |
+| Waiting on a slow external API call         | Yes                                    |
+| Multi-step tool execution                   | Yes                                    |
+| Short request-response handlers             | No — not needed                        |
+| Background work via scheduling or workflows | No — alarms already keep the DO active |
+
+> **Note:** `keepAlive()` is marked `@experimental` and may change between releases.
+
 ## Managing Schedules
 
 ### Get a Schedule
@@ -717,6 +776,16 @@ async cancelSchedule(id: string): Promise<boolean>
 ```
 
 Cancel a scheduled task. Returns `true` if cancelled, `false` if not found.
+
+### keepAlive()
+
+```typescript
+async keepAlive(): Promise<() => void>
+```
+
+Create a 30-second heartbeat schedule that prevents the Durable Object from being evicted due to inactivity. Returns a disposer function that cancels the heartbeat when called. The disposer is idempotent — calling it multiple times is safe.
+
+See [Keeping the Agent Alive](#keeping-the-agent-alive) for usage details.
 
 ## Limits
 
